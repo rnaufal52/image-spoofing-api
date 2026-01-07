@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: image-spoofing-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount .env file
+      - ./.env:/app/.env
+      # Optional: Mount entire models/ and app/ for live reloading during dev
+      # - ./app:/app/app
+      # - ./models:/app/models
+    environment:
+      - MODEL_PATH=models/DeePixBiS.pth
+    restart: unless-stopped
