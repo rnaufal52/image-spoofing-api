@@ -71,23 +71,23 @@ curl -X POST "http://127.0.0.1:8000/anti-spoof" \
 
 ```json
 {
-  "success": true,
-  "status_code": 200,
-  "message": "Analysis completed",
-  "data": {
-    "decision": "PASS",
-    "score": 0.952,
-    "verdict": "Real Face",
-    "details": {
-      "mean_score": 0.952,
-      "patch_max_score": 0.98,
-      "checks": {
-        "texture": "Normal",
-        "glare": "Normal",
-        "moire": "None"
-      }
+    "success": true,
+    "status_code": 200,
+    "message": "Anti-spoofing analysis completed successfully",
+    "data": {
+        "decision": "FAIL",
+        "mean_score": 0.4553,
+        "patch_max_score": 0.6833,
+        "local_variance": 242.6,
+        "rgb_corr": 0.9688,
+        "freq_spike_ratio": 0.00116,
+        "glare_asym": 0.0,
+        "evidence_count": 1,
+        "evidence": [
+            "strong_ai_spoof_detection"
+        ],
+        "reason": "ai_model_rejected"
     }
-  }
 }
 ```
 
