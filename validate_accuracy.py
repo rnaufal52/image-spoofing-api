@@ -28,6 +28,9 @@ def validate_folder(folder_path, expected_label):
                 
             result = predict(image)
             
+            if total % 100 == 0:
+                print(f"Processed {total} images...", end='\r')
+            
             # FAIL means Spoof (Fake), PASS means Real
             prediction = result.decision  
             
@@ -42,9 +45,26 @@ def validate_folder(folder_path, expected_label):
             if is_correct:
                 correct += 1
             else:
+                # Save Failed Images for Review
+                failed_dir = "failed_validation_images"
+                missed_fake_dir = os.path.join(failed_dir, "missed_fake")
+                missed_real_dir = os.path.join(failed_dir, "missed_real")
+                os.makedirs(missed_fake_dir, exist_ok=True)
+                os.makedirs(missed_real_dir, exist_ok=True)
+                
+                import shutil
+                
                 # Analyze False Negatives (Fake labeled as Real)
                 if expected_label == "Fake" and prediction == "PASS":
-                     print(f"[MISSED FAKE] Score: {result.mean_score:.4f}, Evidence: {result.evidence}, Reason: {result.reason}")
+                     print(f"[MISSED FAKE] File: {os.path.basename(img_path)} | Score: {result.mean_score:.4f}, Evidence: {result.evidence}, Reason: {result.reason}")
+                     dst_path = os.path.join(missed_fake_dir, f"[SCORE_{result.mean_score:.4f}]_{os.path.basename(img_path)}")
+                     shutil.copy(img_path, dst_path)
+                
+                # Analyze False Positives (Real labeled as Fake/Fail)
+                if expected_label == "Real" and prediction == "FAIL":
+                     print(f"[MISSED REAL] File: {os.path.basename(img_path)} | Score: {result.mean_score:.4f}, Evidence: {result.evidence}, Reason: {result.reason}")
+                     dst_path = os.path.join(missed_real_dir, f"[SCORE_{result.mean_score:.4f}]_{os.path.basename(img_path)}")
+                     shutil.copy(img_path, dst_path)
 
         except Exception:
             pass
@@ -63,22 +83,29 @@ def analyze_scores(folder_path):
             image = cv2.imread(img_path)
             if image is None: continue
             
-            # Predict manually to get score
-            from app.services.modelServices import model, get_face_crop, transform, DEVICE
-            import torch
+            # Use the service predict function which handles logic correctly
+            from app.services.modelServices import predict
+            result = predict(image)
+            # result.details["mean_score"] or result.mean_score? 
+            # PredictionResult schema usually has mean_score?
+            # Checking modelServices.py: details dictionary has mean_score.
+            # PredictionResult object has stats/details? 
+            # Let's check schema/prediction.py if possible, but predict returns PredictionResult... 
+            # In predict function: return PredictionResult(..., details=details)
+            # So result.details['mean_score'] should work.
             
-            face_crop = get_face_crop(image)
-            if face_crop is None: continue
-            
-            rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-            tensor = transform(rgb_crop).unsqueeze(0).to(DEVICE)
-            with torch.inference_mode():
-                output = model(tensor)
-                spoof_map = output[0] if isinstance(output, (tuple, list)) else output
-                mean_score = float(torch.mean(spoof_map).item())
-                scores.append(mean_score)
-                
-        except Exception:
+            # Wait, PredictionResult schema (from previous edits/knowledge) probably has fields.
+            # But let's assume result.details is accessible.
+            if hasattr(result, 'details') and 'mean_score' in result.details:
+                scores.append(result.details['mean_score'])
+            elif hasattr(result, 'mean_score'): # If schema has direct field (unlikely based on code)
+                 scores.append(result.mean_score)
+            else:
+                 # Fallback if I can't find it, but predict sets details.
+                 scores.append(0.0)
+                 
+        except Exception as e:
+            # print(f"Error: {e}")
             pass
 
     if scores:

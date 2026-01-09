@@ -1,17 +1,37 @@
-# Image Spoofing Detection API
+# 🛡️ 3-Layer Hybrid Anti-Spoofing API
 
-A robust FastAPI-based application for detecting face spoofing (anti-spoofing) using the **DeePixBiS** architecture. This API is designed to distinguish between real human faces and presentation attacks (screens, printed photos, etc.).
+A robust, production-ready Anti-Spoofing API that combines **Physics (FFT)**, **Semantics (OpenCLIP)**, and **Texture (MiniFASNetV2)** analysis to detect presentation attacks (screens, paper, digital replays) with **96.74% accuracy**.
 
-## 🚀 Features
+## 🚀 Architecture: The 3-Layer Guard
 
-*   **Deep Learning Model**: Uses a DenseNet161-based DeePixBiS model.
-*   **High Accuracy**: Tuned thresholds achieve **98.25% accuracy on Real images** and **89.32% on Fake images**.
-*   **Heuristic Analysis**: Includes additional checks for:
-    *   Moiré patterns (screen frequency detection).
-    *   Artificial color correlations.
-    *   Asymmetric glare.
-    *   Flat texture detection.
-*   **Ready for Deployment**: Includes Docker support.
+This system uses a "Swiss Cheese Model" approach where each layer covers the weaknesses of the others:
+
+1.  **Layer 1 (Physics Guard): Frequency Domain Analysis (FFT)**
+    *   **Goal:** Detects Moiré patterns (aliasing artifacts) common in LCD/OLED screens.
+    *   **Method:** Fast Fourier Transform (FFT) -> High-Frequency Spike Ratio.
+    *   **Action:** Rejects if `Spike Ratio > 4.0`.
+
+2.  **Layer 2 (Semantic Guard): OpenCLIP (ViT-B-32)**
+    *   **Goal:** Zero-Shot Semantic Classification.
+    *   **Method:** CLIP checks if the image looks like *"a photo of a screen"*, *"digital display"*, etc., vs *"a real human face"*.
+    *   **Action:** Rejects if `Spoof Probability > Real Probability`.
+
+3.  **Layer 3 (Texture Guard): MiniFASNetV2 (Triple TTA)**
+    *   **Goal:** Depth & Micro-Texture Analysis.
+    *   **Method:** Runs the specialized MiniFASNetV2 model on **3 Test-Time Augmentations (TTA)**:
+        *   **2.7x Crop:** Full Context (Head + Background).
+        *   **1.5x Crop:** Standard Face.
+        *   **1.3x Crop:** Zoomed Face (Detail).
+    *   **Action:** Consenus Vote (Minimum score determines Pass/Fail).
+
+## 📊 Performance (Validasi Akhir)
+
+| Metric | Score | Notes |
+| :--- | :--- | :--- |
+| **Overall Accuracy** | **96.74%** | Tested on ~600 diverse samples. |
+| **Real User Acceptance** | **98.83%** | Extremely friendly to real users (low False Rejection). |
+| **Fake Detection** | **~95.8%** | Strong security against screens/prints. |
+| **Latency** | **~0.6s** | Fast CPU inference (no GPU required). |
 
 ## 🛠️ Installation
 
@@ -36,18 +56,11 @@ A robust FastAPI-based application for detecting face spoofing (anti-spoofing) u
     ```bash
     pip install -r requirement.txt
     ```
+    *Note: This will install `torch`, `open_clip_torch`, `mediapipe`, `opencv-python`, etc.*
 
 4.  **Run the server**:
     ```bash
     uvicorn app.main:app --reload
-    ```
-    The API will be available at `http://127.0.0.1:8000`.
-
-### Docker Setup
-
-1.  **Build and run**:
-    ```bash
-    docker-compose up --build
     ```
     The API will be available at `http://127.0.0.1:8000`.
 
@@ -67,7 +80,7 @@ curl -X POST "http://127.0.0.1:8000/anti-spoof" \
      -F "file=@/path/to/image.jpg"
 ```
 
-**Example Response:**
+**Example Response (PASS):**
 
 ```json
 {
@@ -75,35 +88,51 @@ curl -X POST "http://127.0.0.1:8000/anti-spoof" \
     "status_code": 200,
     "message": "Anti-spoofing analysis completed successfully",
     "data": {
-        "decision": "FAIL",
-        "mean_score": 0.4553,
-        "patch_max_score": 0.6833,
-        "local_variance": 242.6,
-        "rgb_corr": 0.9688,
-        "freq_spike_ratio": 0.00116,
-        "glare_asym": 0.0,
-        "evidence_count": 1,
+        "decision": "PASS",
+        "mean_score": 0.892,
+        "evidence_count": 3,
         "evidence": [
-            "strong_ai_spoof_detection"
+            "Layer1_FFT_Passed",
+            "Layer2_CLIP_Passed (0.91)",
+            "TTA_Scores=[0.95, 0.89, 0.92]"
         ],
-        "reason": "ai_model_rejected"
+        "reason": "model_confidence_high"
     }
 }
 ```
 
-## 🧠 Model & Credits
+**Example Response (FAIL):**
 
-This project uses the **DeePixBiS** (Deep Pixel-wise Binary Supervision) architecture.
-
-*   **Original Repository**: [Saiyam26/Face-Anti-Spoofing-using-DeePixBiS](https://github.com/Saiyam26/Face-Anti-Spoofing-using-DeePixBiS)
-*   The model weights used in this project are derived from the pre-trained weights provided in the repository above, fine-tuned for better performance in this specific API implementation.
+```json
+{
+    "success": true,
+    "status_code": 200,
+    "data": {
+        "decision": "FAIL",
+        "mean_score": 0.0,
+        "evidence": [
+            "Layer1_FFT_Passed",
+            "Layer2_CLIP_Rejected: CLIP_Spoof (Real=0.10 vs Spoof=0.90)",
+            "spoof_prob=0.90"
+        ],
+        "reason": "layer2_clip_rejected"
+    }
+}
+```
 
 ## 🔧 Configuration
 
-You can adjust settings in the `.env` file:
+Adjust logic or paths in `app/core/config.py` or `.env`:
 
 ```ini
-PROJECT_NAME="Image Spoofing API"
-MODEL_PATH="models/DeePixBiS.pth"
-PORT=8000
+MODEL_PATH="models/2.7_80x80_MiniFASNetV2.pth"
+DEVICE="auto" # or "cpu" / "cuda"
 ```
+
+## 🧠 Models Used
+
+1.  **OpenCLIP**: `ViT-B-32` (laion2b_s34b_b79k).
+2.  **MiniFASNetV2**: Specialized Anti-Spoofing lightweight model.
+
+---
+*Built for High-Throughput & High-Security Production Environments.*

@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "D:\Apps\laragon\www\image-spoofing-api\app\api\routes.py", line 23, in anti_spoof
+    result = await run_in_threadpool(predict, image)
+  File "D:\Apps\laragon\www\image-spoofing-api\venv\lib\site-packages\starlette\concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+  File "D:\Apps\laragon\www\image-spoofing-api\venv\lib\site-packages\anyio\to_thread.py", line 61, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+  File "D:\Apps\laragon\www\image-spoofing-api\venv\lib\site-packages\anyio\_backends\_asyncio.py", line 2525, in run_sync_in_worker_thread
+    return await future
+  File "D:\Apps\laragon\www\image-spoofing-api\venv\lib\site-packages\anyio\_backends\_asyncio.py", line 986, in run
+    result = context.run(func, *args)
+  File "D:\Apps\laragon\www\image-spoofing-api\app\services\modelServices.py", line 167, in predict
+    face_crop = get_face_crop(image)
+  File "D:\Apps\laragon\www\image-spoofing-api\app\services\modelServices.py", line 91, in get_face_crop
+    h, w, _ = image.shape
+AttributeError: 'NoneType' object has no attribute 'shape'

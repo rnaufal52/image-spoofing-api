@@ -9,3 +9,4 @@ pillow
 pyjwt
 pydantic-settings
 mediapipe==0.10.9
+open_clip_torch
