@@ -80,11 +80,13 @@ def read_image_from_bytes(data: bytes) -> np.ndarray:
         image_pil = ImageOps.exif_transpose(image_pil)
         image_np = np.array(image_pil)
         if image_np.shape[2] == 4:
+             # RGBA -> BGR
              image_np = cv2.cvtColor(image_np, cv2.COLOR_RGBA2BGR)
         else:
+             # RGB -> BGR
              image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        # Convert RGB to BGR for OpenCV standard
-        return cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        
+        return image_np
     except Exception as e:
         print(f"EXIF Handle Error: {e}")
         nparr = np.frombuffer(data, np.uint8)
@@ -218,8 +220,8 @@ def infer_clip_layer1(face_crop: np.ndarray) -> dict:
     spoof_prob = sum(probs[1:])  
     
     # Logic: Real must be significant
-    # Lowered threshold 0.4 -> 0.35 to allow Real faces to pass without "selfie" prompt.
-    is_real = real_prob > 0.35
+    # STRICT MODE: Raised to 0.50 (Real must be > Spoof probability)
+    is_real = real_prob > settings.CLIP_THRESHOLD
     
     reason = "CLIP_Real" if is_real else f"CLIP_Spoof (Real={real_prob:.2f} vs Spoof={spoof_prob:.2f})"
     
@@ -300,7 +302,7 @@ def predict(image: np.ndarray) -> PredictionResult:
     
     # Decision
     decision = "FAIL"
-    threshold = 0.20
+    threshold = settings.MINIFASNET_THRESHOLD
     evidence = [f"Layer1_FFT_Passed", f"Layer2_CLIP_Passed ({clip_result['score']:.2f})", f"TTA_Scores=[{score_context:.2f}, {score_15:.2f}, {score_13:.2f}]"]
     
     reason = "model_confidence_low"

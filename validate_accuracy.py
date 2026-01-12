@@ -2,7 +2,7 @@ import os
 import cv2
 import glob
 import sys
-from app.services.modelServices import predict, load_model
+from app.services.modelServices import predict, load_model, read_image_from_bytes
 
 # Ensure model is loaded
 load_model()
@@ -21,7 +21,11 @@ def validate_folder(folder_path, expected_label):
             
         total += 1
         try:
-            image = cv2.imread(img_path)
+            # FIX: Use exact same loading logic as API (Handles EXIF Rotation)
+            with open(img_path, "rb") as f:
+                content = f.read()
+            image = read_image_from_bytes(content)
+            
             if image is None:
                 print(f"Skipping unreadable: {img_path}")
                 continue
@@ -80,7 +84,10 @@ def analyze_scores(folder_path):
         if not img_path.lower().endswith(('.png', '.jpg', '.jpeg')):
             continue
         try:
-            image = cv2.imread(img_path)
+            with open(img_path, "rb") as f:
+                content = f.read()
+            image = read_image_from_bytes(content)
+            
             if image is None: continue
             
             # Use the service predict function which handles logic correctly

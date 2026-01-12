@@ -127,6 +127,11 @@ Adjust logic or paths in `app/core/config.py` or `.env`:
 ```ini
 MODEL_PATH="models/2.7_80x80_MiniFASNetV2.pth"
 DEVICE="auto" # or "cpu" / "cuda"
+
+# DETECTION MODES
+# "BALANCED" (Default): 96.7% Accuracy (Real 98.8%, Fake 95.8%)
+# "STRICT": 95.4% Accuracy (Real 86.5%, Fake 99.0%) - Zero Tolerance
+DETECTION_MODE="BALANCED" 
 ```
 
 ## 🧠 Models Used
