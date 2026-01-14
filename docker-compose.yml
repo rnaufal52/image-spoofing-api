@@ -1,17 +1,17 @@
-version: '3.8'
-
 services:
   api:
     build: .
     container_name: image-spoofing-api
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
-      # Mount .env file
+      # Mount file .env lokal ke dalam container
       - ./.env:/app/.env
-      # Optional: Mount entire models/ and app/ for live reloading during dev
-      # - ./app:/app/app
-      # - ./models:/app/models
+      # Cache model agar tidak download ulang jika ganti container
+      - model_cache:/root/.cache
     environment:
-      - MODEL_PATH=models/DeePixBiS.pth
+      - MODEL_PATH=models/2.7_80x80_MiniFASNetV2.pth
     restart: unless-stopped
+
+volumes:
+  model_cache: 

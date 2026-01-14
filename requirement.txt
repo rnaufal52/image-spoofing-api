@@ -2,10 +2,12 @@ fastapi
 uvicorn
 torch==1.13.1
 torchvision==0.14.1
-opencv-contrib-python
+opencv-python-headless
 numpy<2
 python-multipart
 pillow
 pyjwt
 pydantic-settings
 mediapipe==0.10.9
+open_clip_torch
+slowapi

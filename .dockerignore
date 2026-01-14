@@ -1,0 +1,13 @@
+**/.venv
+**/venv
+**/__pycache__
+**/.git
+**/.ipynb_checkpoints
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.example
+error_log.txt
+inspect_output.txt
+README.md

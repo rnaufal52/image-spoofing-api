@@ -11,7 +11,7 @@ from app.core.limiter import limiter
 router = APIRouter()
 
 @router.post("/anti-spoof", response_model=None)
-@limiter.limit("1000/minute")
+@limiter.limit("100/minute")
 async def anti_spoof(request: Request, file: UploadFile = File(...)):
     # Validate image
     await validate_image(file)

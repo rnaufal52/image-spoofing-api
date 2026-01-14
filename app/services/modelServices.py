@@ -1,352 +1,350 @@
+# ============================================================
+# IMPORTS
+# ============================================================
 import torch
 import cv2
 import numpy as np
 import os
 import mediapipe as mp
-from torchvision import transforms
+import torch.nn.functional as F
+from collections import OrderedDict
+import open_clip 
 from PIL import Image
 
 from app.core.config import settings
 from app.schemas.prediction import PredictionResult
-from models.model import DeePixBiS
+from models.minifasnet import MiniFASNetV2
 
 # ============================================================
 # CONFIGURATION & INITIALIZATION
 # ============================================================
-
-# Define device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Global Model Variables
-model = None
+# Global Models
+model_mini = None      # Layer 2: MiniFASNetV2
+model_clip = None      # Layer 1: OpenCLIP
+transform_clip = None 
+tokenizer_clip = None
 
-# Transform untuk DeePixBiS
-# CHANGE: Ditambahkan Normalize((0.5...), (0.5...))
-transform = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) 
-])
-
-# Initialize MediaPipe Face Detection (Load sekali saja di awal biar cepat)
-mp_face_detection = mp.solutions.face_detection
-# model_selection=1 (range jauh/selfie full body), 0 (jarak dekat webcam)
-# min_detection_confidence=0.5
-face_detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+# MediaPipe Face Detector
+# MediaPipe Face Detector
+face_detector = None
 
 def load_model():
-    """
-    Loads the DeePixBiS model weights.
-    """
-    global model
+    global model_mini, model_clip, transform_clip, tokenizer_clip, face_detector
+    
+    # 1. Load OpenCLIP (Layer 1)
     try:
-        model = DeePixBiS(pretrained=True).to(DEVICE)
-        
-        if os.path.exists(settings.MODEL_PATH):
-            state_dict = torch.load(settings.MODEL_PATH, map_location=DEVICE)
-            model.load_state_dict(state_dict)
-            print(f"✅ Model loaded successfully from {settings.MODEL_PATH}")
-        else:
-            print(f"⚠️ WARNING: Model file not found at {settings.MODEL_PATH}. Using random weights.")
-            
-        model.eval()
+        print("Loading Layer 1: OpenCLIP (ViT-B-32)...")
+        model_clip, _, transform_clip = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+        model_clip = model_clip.to(DEVICE)
+        tokenizer_clip = open_clip.get_tokenizer('ViT-B-32')
+        print("✅ OpenCLIP loaded successfully")
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        raise e
+        print(f"❌ Failed to load OpenCLIP: {e}")
+        return False
 
-# Auto-load on import
+    # 2. Load MiniFASNetV2 (Layer 2)
+    try:
+        print("Loading Layer 2: MiniFASNetV2...")
+        model_mini = MiniFASNetV2(conv6_kernel=(5, 5)).to(DEVICE)
+        state_dict = torch.load(settings.MODEL_PATH, map_location=DEVICE, weights_only=True)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('module.'):
+                new_state_dict[k[7:]] = v
+            else:
+                new_state_dict[k] = v
+        model_mini.load_state_dict(new_state_dict)
+        model_mini.eval()
+        print("✅ MiniFASNetV2 loaded successfully")
+    except Exception as e:
+        print(f"❌ Failed to load MiniFASNetV2: {e}")
+        return False
+
+    # 3. Load MediaPipe Face Detector
+    try:
+        if face_detector is None:
+            print("Loading Layer 0: MediaPipe Face Detector...")
+            face_detector = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.6)
+            print("✅ MediaPipe Face Detector loaded successfully")
+    except Exception as e:
+        print(f"❌ Failed to load Face Detector: {e}")
+        return False
+        
+    return True
+
+# Auto-load
 try:
     load_model()
 except Exception:
-    pass 
+    pass
 
 # ============================================================
-# UTILS & PRE-PROCESSING (FACE CROP)
+# HELPER FUNCTIONS (Crop, Read)
 # ============================================================
-
-def get_face_crop(image: np.ndarray) -> np.ndarray:
-    """
-    Mendeteksi wajah menggunakan MediaPipe dan melakukan cropping.
-    Mengembalikan numpy array wajah (cropped). 
-    Return None jika tidak ada wajah.
-    """
-    ih, iw, _ = image.shape
-    
-    # MediaPipe butuh RGB
-    results = face_detector.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    
-    if not results.detections:
-        return None
-
-    # Ambil wajah dengan confidence tertinggi (index 0 biasanya urut confidence)
-    detection = results.detections[0] 
-    bboxC = detection.location_data.relative_bounding_box
-    
-    x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
-                 int(bboxC.width * iw), int(bboxC.height * ih)
-
-    # Tambahkan Padding 15% agar dagu/dahi tidak terpotong pas
-    # DeePixBiS perlu sedikit konteks
-    pad_h = int(h * 0.15)
-    pad_w = int(w * 0.15)
-    
-    x = max(0, x - pad_w)
-    y = max(0, y - pad_h)
-    w = min(iw - x, w + pad_w * 2)
-    h = min(ih - y, h + pad_h * 2)
-
-    # Validasi ukuran crop agar tidak 0
-    if w <= 0 or h <= 0:
-        return None
-
-    cropped_face = image[y:y+h, x:x+w]
-    return cropped_face
-
 def read_image_from_bytes(data: bytes) -> np.ndarray:
-    nparr = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Image decoding failed.")
-    return img
+    try:
+        from PIL import Image, ImageOps
+        import io
+        image_pil = Image.open(io.BytesIO(data))
+        image_pil = ImageOps.exif_transpose(image_pil)
+        image_np = np.array(image_pil)
+        if image_np.shape[2] == 4:
+             # RGBA -> BGR
+             image_np = cv2.cvtColor(image_np, cv2.COLOR_RGBA2BGR)
+        else:
+             # RGB -> BGR
+             image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        
+        return image_np
+    except Exception as e:
+        print(f"EXIF Handle Error: {e}")
+        nparr = np.frombuffer(data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        return image
+
+def get_face_crop(image: np.ndarray, scale: float = 2.7):
+    if image is None: return None
+    h, w, _ = image.shape
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = face_detector.process(image_rgb)
+    if not results.detections: return None
+    
+    detection = results.detections[0]
+    bboxC = detection.location_data.relative_bounding_box
+    x, y, wd, ht = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
+    
+    # Scale logic
+    box_w, box_h = wd, ht
+    scale = min((h - 1) / box_h, min((w - 1) / box_w, scale))
+    new_width, new_height = int(box_w * scale), int(box_h * scale)
+    center_x, center_y = x + box_w / 2, y + box_h / 2
+    
+    x1 = int(center_x - new_width / 2)
+    y1 = int(center_y - new_height / 2)
+    x2 = int(center_x + new_width / 2)
+    y2 = int(center_y + new_height / 2)
+    
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    
+    face_crop = image[y1:y2, x1:x2]
+    return face_crop if face_crop.size > 0 else None
 
 # ============================================================
-# HELPER FUNCTIONS (OPTICS + STATISTICS)
+# INFERENCE LOGIC (Layer 1 & Layer 2)
 # ============================================================
 
-def glare_score(image: np.ndarray) -> float:
-    # Menggunakan HSV Value channel untuk deteksi over-exposure (pantulan layar)
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    v = hsv[:, :, 2] / 255.0
-    bright = (v > 0.95).astype(np.uint8) # Threshold glare dinaikkan sedikit
-    return float(bright.mean())
+# ============================================================
+# LAYER 0: FREQUENCY DOMAIN ANALYSIS (FFT)
+# ============================================================
+def analyze_frequency_domain(face_crop: np.ndarray) -> dict:
+    """
+    Analyzes the image in frequency domain to detect periodic noise (Moire patterns).
+    Returns: { "is_anomaly": bool, "score": float, "reason": str }
+    """
+    try:
+        # 1. Convert to Grayscale
+        gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        
+        # 2. FFT
+        f = np.fft.fft2(gray)
+        fshift = np.fft.fftshift(f)
+        magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1e-6)
+        
+        # 3. Calculate Energy Concentration (Classic blur/moire metric)
+        # Periodic patterns (moire) create distinct spikes in high frequencies.
+        # Natural images have energy concentrated in center (low freq).
+        
+        # Mask center (Low Freq)
+        cx, cy = w // 2, h // 2
+        radius = 5  # Blocking DC component
+        mask = np.ones((h, w), np.uint8)
+        cv2.circle(mask, (cx, cy), radius, 0, -1)
+        
+        # High Frequency Magnitude
+        hf_magnitude = magnitude_spectrum * mask
+        hf_mean = np.mean(hf_magnitude)
+        hf_max = np.max(hf_magnitude)
+        
+        # Spike Ratio: If max spike is way higher than mean background noise -> Artificial Pattern
+        spike_ratio = hf_max / (hf_mean + 1e-6)
+        
+        # Threshold: Tuned conservatively. 
+        # Moire patterns often cause spike_ratio > 3.5 or 4.0
+        # Normal images usually < 3.0
+        threshold = 4.0 
+        
+        is_anomaly = spike_ratio > threshold
+        return {"is_anomaly": is_anomaly, "score": float(spike_ratio), "reason": "moire_pattern_detected" if is_anomaly else "normal_freq"}
+        
+    except Exception as e:
+        print(f"FFT Error: {e}")
+        return {"is_anomaly": False, "score": 0.0, "reason": "fft_error"}
 
-def patch_max_score(spoof_map: torch.Tensor) -> float:
+# ============================================================
+# INFERENCE LOGIC (Layer 1, 2, 3)
+# ============================================================
+
+def infer_clip_layer1(face_crop: np.ndarray) -> dict:
     """
-    Mengambil rata-rata patch tertinggi dari output map model.
-    spoof_map shape: (1, H, W)
+    Layer 1: OpenCLIP Zero-Shot
     """
-    m = spoof_map.squeeze().detach().cpu().numpy()
-    h, w = m.shape
-    # Bagi image map menjadi 4 kuadran
-    patches = [
-        m[:h//2, :w//2], m[:h//2, w//2:],
-        m[h//2:, :w//2], m[h//2:, w//2:],
+    if model_clip is None: return {"is_real": False, "score": 0.0, "reason": "Model Not Loaded"}
+    
+    # Prepare Image (PIL RGB)
+    img_pil = Image.fromarray(cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB))
+    img_tensor = transform_clip(img_pil).unsqueeze(0).to(DEVICE)
+    
+    # Prepare Prompts (Global Expanded List)
+    # STRICTER OPTIMIZATION: Removed "selfie" to prevent screen-selfies from passing.
+    # We rely on specific NEGATIVE prompts to catch spoofs.
+    prompts = [
+        "a real human face",              # [0] Real
+        
+        "a photo of a screen",            # [1] Spoof
+        "a digital display",              # [2] Spoof
+        "glossy reflection on screen",    # [3] Spoof
+        "monitor bezel",                  # [4] Spoof
+        "a printed paper face",           # [5] Spoof
+        "a spoof face"                    # [6] Spoof
     ]
-    return float(max(p.mean() for p in patches))
-
-def local_variance(image: np.ndarray) -> float:
-    """
-    Mendeteksi kekayaan tekstur.
-    Wajah asli: Variance tinggi (pori-pori, rambut).
-    Layar/Kertas: Variance rendah (flat/blur).
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, (128, 128))
+    text = tokenizer_clip(prompts).to(DEVICE)
     
-    # Hitung variance per blok
-    # Menggunakan kernel standard deviation filter bisa lebih cepat, tapi loop ini oke untuk size kecil
-    vars_ = []
-    for i in range(0, 128, 16):
-        for j in range(0, 128, 16):
-            block = gray[i:i+16, j:j+16]
-            vars_.append(block.var())
-            
-    return float(np.mean(vars_))
-
-def color_correlation(image: np.ndarray) -> float:
-    """
-    Mendeteksi linearitas warna (Channel R vs G).
-    Layar HP sering memiliki korelasi warna yang tidak wajar dibanding kulit alami.
-    """
-    b, g, r = cv2.split(image)
+    with torch.no_grad():
+        image_features = model_clip.encode_image(img_tensor)
+        text_features = model_clip.encode_text(text)
+        
+        # Normalize
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+        
+        # Probabilities
+        text_probs = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+        probs = text_probs[0].cpu().numpy()
+        
+    # Real Class [0]
+    real_prob = probs[0]
+    # Sum of Spoof Classes [1:]
+    spoof_prob = sum(probs[1:])  
     
-    # Downsample biar cepat hitung correlation
-    r_small = cv2.resize(r, (64, 64)).flatten()
-    g_small = cv2.resize(g, (64, 64)).flatten()
-
-    if r_small.std() == 0 or g_small.std() == 0:
-        return 1.0
-
-    return float(np.corrcoef(r_small, g_small)[0, 1])
-
-def frequency_spike_ratio(image: np.ndarray) -> float:
-    """
-    FFT untuk mendeteksi Moiré Pattern (Grid pixel layar).
-    Sangat efektif pada crop wajah.
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, (128, 128)) # Resize 128 cukup untuk FFT
-
-    f = np.fft.fftshift(np.fft.fft2(gray))
-    mag = np.log(np.abs(f) + 1)
-
-    h, w = mag.shape
-    center_h, center_w = h // 2, w // 2
+    # Logic: Real must be significant
+    # STRICT MODE: Raised to 0.50 (Real must be > Spoof probability)
+    is_real = real_prob > settings.CLIP_THRESHOLD
     
-    # Masking DC Component (Frekuensi rendah di tengah)
-    mag[center_h-5:center_h+5, center_w-5:center_w+5] = 0
-
-    mean = mag.mean()
-    std = mag.std()
+    reason = "CLIP_Real" if is_real else f"CLIP_Spoof (Real={real_prob:.2f} vs Spoof={spoof_prob:.2f})"
     
-    # Deteksi spike yang jauh diatas rata-rata (pola berulang)
-    spikes = (mag > mean + 3.5 * std).astype(np.uint8)
-    return float(spikes.mean())
+    return {"is_real": is_real, "score": float(real_prob), "reason": reason, "spoof_score": float(spoof_prob)}
 
-# ============================================================
-# MAIN PREDICT
-# ============================================================
+def infer_minifasnet_layer2(face_crop: np.ndarray) -> float:
+    """Layer 2: MiniFASNet Texture Analysis"""
+    if face_crop is None: return 0.0
+    face_resized = cv2.resize(face_crop, (80, 80))
+    face_transposed = np.transpose(face_resized, (2, 0, 1))
+    img_tensor = torch.from_numpy(face_transposed).float().to(DEVICE).unsqueeze(0)
+    with torch.no_grad():
+        prediction = model_mini(img_tensor)
+        prob = F.softmax(prediction, dim=1)
+        return prob[0][1].item() # Real Score
 
 def predict(image: np.ndarray) -> PredictionResult:
-    if model is None:
-        raise RuntimeError("Model is not loaded.")
+    """
+    3-LAYER PIPELINE (Optimized):
+    Layer 1 (FFT): Physics Check (Moire Patterns)
+    Layer 2 (OpenCLIP): Semantic Check (Screen/Digital/Glossy)
+    Layer 3 (MiniFASNet): Texture Check (Triple Scale TTA)
+    """
+    if model_clip is None or model_mini is None:
+        load_model()
 
-    # [STEP 1] CROP WAJAH
-    face_crop = get_face_crop(image)
-
+    # Get Face Crop (Standard 2.7x Context)
+    face_crop = get_face_crop(image, scale=2.7)
     if face_crop is None:
-        # Jika tidak ada wajah, langsung return FAIL/Error
-        return PredictionResult(
+         return PredictionResult(decision="FAIL", mean_score=0.0, patch_max_score=0.0, local_variance=0.0, rgb_corr=0.0, freq_spike_ratio=0.0, glare_asym=0.0, evidence_count=1, evidence=["no_face_detected"], reason="No Face Detected")
+
+    # === LAYER 1: FREQUENCY ANALYSIS (FFT) ===
+    fft_result = analyze_frequency_domain(face_crop)
+    if fft_result["is_anomaly"]:
+         return PredictionResult(
             decision="FAIL",
             mean_score=0.0,
             patch_max_score=0.0,
             local_variance=0.0,
             rgb_corr=0.0,
-            freq_spike_ratio=0.0,
+            freq_spike_ratio=fft_result["score"],
             glare_asym=0.0,
             evidence_count=1,
-            evidence=["no_face_detected"],
-            reason="Wajah tidak terdeteksi. Pastikan pencahayaan cukup dan wajah terlihat jelas."
+            evidence=[f"Layer1_FFT_Rejected: {fft_result['reason']}", f"spike_ratio={fft_result['score']:.2f}"],
+            reason="layer1_fft_moire_detected"
         )
-
-    # Gunakan face_crop untuk semua analisis selanjutnya
-    target_img = face_crop
-
-    # -----------------
-    # DeepPixBiS Inference
-    # -----------------
-    rgb_crop = cv2.cvtColor(target_img, cv2.COLOR_BGR2RGB)
     
-    # Transform akan meresize crop ke 224x224 & Normalize
-    tensor = transform(rgb_crop).unsqueeze(0).to(DEVICE)
-
-    with torch.inference_mode():
-        output = model(tensor)
-        # Handle output format (kadang tuple, kadang tensor direct)
-        spoof_map = output[0] if isinstance(output, (tuple, list)) else output
+    # === LAYER 2: OpenCLIP ===
+    clip_result = infer_clip_layer1(face_crop)
+    if not clip_result["is_real"]:
+        return PredictionResult(
+            decision="FAIL",
+            mean_score=clip_result["score"],
+            patch_max_score=0.0,
+            local_variance=0.0,
+            rgb_corr=0.0,
+            freq_spike_ratio=0.0,
+            glare_asym=0.0,
+            evidence_count=2,
+            evidence=[f"Layer1_FFT_Passed", f"Layer2_CLIP_Rejected: {clip_result['reason']}", f"spoof_prob={clip_result['spoof_score']:.2f}"],
+            reason="layer2_clip_rejected"
+        )
         
-        # Mean score: Rata-rata probabilitas pixel (0=spoof, 1=real)
-        mean_score = float(torch.mean(spoof_map).item())
-        max_patch = patch_max_score(spoof_map)
-
-    # -----------------
-    # Heuristic Checks (Pada Wajah Crop)
-    # -----------------
-    lv = local_variance(target_img)
-    corr = color_correlation(target_img)
-    spike_ratio = frequency_spike_ratio(target_img)
-
-    h_f, w_f, _ = target_img.shape
-    gl_left = glare_score(target_img[:, :w_f//2])
-    gl_right = glare_score(target_img[:, w_f//2:])
-    glare_asym = abs(gl_left - gl_right)
-
-    # ============================================================
-    # EVIDENCE COLLECTION & THRESHOLDING
-    # ============================================================
+    # === LAYER 3: MiniFASNet (TRIPLE TTA) ===
+    # TTA 1: Scale 2.7 (Context)
+    score_context = infer_minifasnet_layer2(face_crop)
     
-    evidence = []
+    # TTA 2: Scale 1.5 (Texture Standard - BEST PRACTICE)
+    crop_15 = get_face_crop(image, scale=1.5)
+    score_15 = infer_minifasnet_layer2(crop_15) if crop_15 is not None else 0.0
     
-    # 1. DeepPixBiS Check
-    # Nilai ini biasanya terbalik tergantung training label (0=Real atau 0=Spoof). 
-    # Di repo Saiyam/GeorgePoly: Output mendekati 0 = Fake, 1 = Real.
-    # Maka Patch Score Rendah = Spoof.
-    
-    # PERHATIAN: Sesuaikan logika if ini dengan output model kamu.
-    # Jika model kamu outputnya: 1=Real, 0=Fake.
-    # Maka "Spoof Patch" adalah patch yang nilainya KECIL.
-    # Namun kode kamu sebelumnya: if max_patch >= 0.6 -> Strong Spoof. 
-    # Ini berarti asumsinya Output Tinggi = Fake? 
-    # SAYA IKUTI ASUMSI KODEMU SEBELUMNYA (High Score = Spoof). 
-    # JIKA TERBALIK (Real > 0.5), SILAKAN BALIK LOGIKANYA.
-    
-    # Tuned Thresholds V3 (Aggressive for Fake Detection)
-    # Analysis:
-    # 53 Fakes are in range 0.45-0.60.
-    # Only 3 Real images are in range 0.45-0.60.
-    # Decision: Raise Strong threshold to 0.60 to catch those 53 fakes.
-    
-    if mean_score < 0.60: 
-        evidence.append("strong_ai_spoof_detection")
-    elif mean_score < 0.80: 
-        evidence.append("weak_ai_spoof_detection")
-
-    # Context-Aware Heuristics
-    # If the AI score is low (< 0.80), we STRICTLY check for other anomalies.
-    # If the AI score is high (> 0.80), we RELAX the checks to allow for environmental noise.
-    
-    is_confused = mean_score < 0.80  # AI is not confident it's real
-    
-    # 2. Frequency Check (Moiré)
-    thr_spike = 0.005 if is_confused else 0.01
-    if spike_ratio > thr_spike:
-        evidence.append("screen_moire_pattern_detected")
-
-    # 3. Color Check
-    thr_corr = 0.99 if is_confused else 0.995
-    if corr > thr_corr: 
-        evidence.append("unnatural_color_correlation")
-
-    # 4. Texture Check
-    thr_lv = 50 if is_confused else 30 
-    if lv < thr_lv: 
-        evidence.append("flat_texture_detected")
-
-    # 5. Glare Check
-    thr_glare = 0.15 if is_confused else 0.25
-    if glare_asym > thr_glare: 
-        evidence.append("asymmetric_screen_glare")
-
-    # ============================================================
-    # FINAL DECISION LOGIC
-    # ============================================================
-
-    # Logika diperketat
-    decision = "PASS"
-    reason = "real_camera"
-
-    if "no_face_detected" in evidence:
-        decision = "FAIL"
-        reason = "no_face"
-    
-    elif "strong_ai_spoof_detection" in evidence:
-        decision = "FAIL"
-        reason = "ai_model_rejected"
+    # TTA 3: Scale 1.3 (Zoomed/Face)
+    crop_13 = get_face_crop(image, scale=1.3)
+    score_13 = infer_minifasnet_layer2(crop_13) if crop_13 is not None else 0.0
         
-    elif len(evidence) >= 2:
-        decision = "FAIL"
-        reason = f"multiple_anomalies: {', '.join(evidence)}"
-        
-    elif evidence == ["weak_ai_spoof_detection"]:
-        # Weak spoof signal ALONE is insufficient to fail (could be a low-quality real selfie)
+    # Consensus: STRICTEST wins (Minimum)
+    final_score = min(score_context, score_15, score_13)
+    
+    # Decision
+    decision = "FAIL"
+    threshold = settings.MINIFASNET_THRESHOLD
+    evidence = [f"Layer1_FFT_Passed", f"Layer2_CLIP_Passed ({clip_result['score']:.2f})", f"TTA_Scores=[{score_context:.2f}, {score_15:.2f}, {score_13:.2f}]"]
+    
+    reason = "model_confidence_low"
+
+    if final_score > threshold:
         decision = "PASS"
-        reason = "low_confidence_spoof_ignored"
+        reason = "model_confidence_high"
         
-    elif len(evidence) == 1:
-        # Jika cuma 1 anomali (misal texture flat karena lighting gelap), 
-        # tapi AI bilang aman (score > 0.65), kita loloskan.
-        decision = "PASS" 
-        reason = f"warning: {evidence[0]}"
+        # Calculate Variance for stats
+        gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_RGB2GRAY)
+        laplacian = cv2.Laplacian(gray_crop, cv2.CV_64F)
+        lv = laplacian.var()
+        
+        if lv < 5: 
+             decision = "FAIL"
+             reason = "flat_texture_detected"
+             evidence.append(f"low_variance={lv:.2f}")
+    else:
+        lv = 0.0 
+        decision = "FAIL"
+        reason = "layer3_minifasnet_rejected"
+        evidence.append("minifasnet_score_too_low")
 
     return PredictionResult(
         decision=decision,
-        mean_score=round(mean_score, 4),
-        patch_max_score=round(max_patch, 4),
+        mean_score=float(final_score),
+        patch_max_score=0.0, 
         local_variance=round(lv, 2),
-        rgb_corr=round(corr, 4),
-        freq_spike_ratio=round(spike_ratio, 5),
-        glare_asym=round(glare_asym, 4),
+        rgb_corr=0.0,
+        freq_spike_ratio=fft_result["score"],
+        glare_asym=0.0,
         evidence_count=len(evidence),
         evidence=evidence,
         reason=reason
