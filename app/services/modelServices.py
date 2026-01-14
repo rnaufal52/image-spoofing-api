@@ -27,10 +27,11 @@ transform_clip = None
 tokenizer_clip = None
 
 # MediaPipe Face Detector
-face_detector = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.6)
+# MediaPipe Face Detector
+face_detector = None
 
 def load_model():
-    global model_mini, model_clip, transform_clip, tokenizer_clip
+    global model_mini, model_clip, transform_clip, tokenizer_clip, face_detector
     
     # 1. Load OpenCLIP (Layer 1)
     try:
@@ -59,6 +60,16 @@ def load_model():
         print("✅ MiniFASNetV2 loaded successfully")
     except Exception as e:
         print(f"❌ Failed to load MiniFASNetV2: {e}")
+        return False
+
+    # 3. Load MediaPipe Face Detector
+    try:
+        if face_detector is None:
+            print("Loading Layer 0: MediaPipe Face Detector...")
+            face_detector = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.6)
+            print("✅ MediaPipe Face Detector loaded successfully")
+    except Exception as e:
+        print(f"❌ Failed to load Face Detector: {e}")
         return False
         
     return True
